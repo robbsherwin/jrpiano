@@ -23,8 +23,12 @@
 ;   Channel 0 full volume:  1 00 1 0000  =  90h
 ;   Channel 0 silent:       1 00 1 1111  =  9Fh
 ;
-; Volume is set to maximum ONCE at startup.  do_play only writes the two
-; frequency bytes so notes sustain until the next key or SPACE is pressed.
+; Startup sets port 61h bits 5:6 to route SN76496 audio to the speaker
+; (required on real PCjr hardware; DOSBox ignores this gating).
+; do_play writes two frequency bytes plus a volume byte (attenuation=0)
+; on every note.  Re-sending the volume byte restores sound after SPACE.
+; A push/pop delay before the volume byte guards against rapid consecutive
+; writes being dropped by the gate array on real hardware.
 ;
 ; Keyboard layout:
 ;   W E   T Y U       <- black keys  (C#  D#  F#  G#  A#)
@@ -74,10 +78,57 @@ start:
         mov  ah, 09h
         int  21h
 
-        ; Silence channel 0 at startup so the chip's undefined power-on
-        ; frequency counter does not blare before the first key is pressed.
-        ; Attenuation = 1111 (silent): 1 00 1 1111 = 9Fh
-        mov  al, 9Fh
+        ; On the PCjr, port 61h (PPI Port B) bits 6:5 select the speaker audio
+        ; source.  After reset they default to 00 (8253 timer = PC-speaker beeper).
+        ; The SN76496 will never be heard until we set bits 5 and 6 to 11.
+        ; DOSBox does not enforce this gating, which is why the program appeared
+        ; to work in the emulator but produced complete silence on real hardware.
+        in   al, 61h
+        or   al, 60h        ; bits 6 and 5 = 11: route SN76496 to speaker
+        out  61h, al
+
+        ; Initialise all four SN76496 channels to silent so we start from a
+        ; known state regardless of what the BIOS left behind at power-on.
+        ; Attenuation 1111 = silent.
+        ;   Channel 0 tone attenuation:  1 00 1 1111 = 9Fh
+        ;   Channel 1 tone attenuation:  1 01 1 1111 = 0BFh
+        ;   Channel 2 tone attenuation:  1 10 1 1111 = 0DFh
+        ;   Noise channel attenuation:   1 11 1 1111 = 0FFh
+        mov  al, 9Fh        ; ch0 silent
+        out  SND_PORT, al
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        mov  al, 0BFh       ; ch1 silent
+        out  SND_PORT, al
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        mov  al, 0DFh       ; ch2 silent
+        out  SND_PORT, al
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        mov  al, 0FFh       ; noise silent
+        out  SND_PORT, al
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        ; Unmute channel 0 so it is ready to play on the first key press.
+        ; Attenuation 0000 = loudest:  1 00 1 0000 = 90h
+        mov  al, 90h
         out  SND_PORT, al
 
         call show_octave    ; draw "+0" in the banner's Octave line
@@ -136,10 +187,13 @@ shift_up:
 ;  Three bytes to the SN76496:
 ;    1. LATCH  - selects channel 0 frequency, loads low 4 bits of N
 ;    2. DATA   - loads high 6 bits of N
-;    3. VOLUME - sets attenuation to 0 (full volume)
-;  Writing the frequency before unmuting ensures we never hear a
-;  transient at the old (or undefined) frequency.  The note then
-;  sustains until the next keypress or SPACE.
+;    3. VOLUME - attenuation = 0 (full volume) -- restores after SPACE
+;
+;  On real PCjr hardware the SN76496 is clocked at 3.58 MHz; consecutive
+;  OUT instructions that arrive too close together can be dropped by the
+;  gate array.  The extra NOPs between writes 2 and 3 ensure at least
+;  ~15 SN76496 clock periods of separation (~4.2 µs at 4.77 MHz 8088),
+;  which is well within the gate array's tolerance on real hardware.
 ; ============================================================
 do_play:
         ; LATCH byte: 1 00 0 D3D2D1D0  ->  80h OR (N AND 0Fh)
@@ -156,8 +210,15 @@ do_play:
         and  al, 3Fh
         out  SND_PORT, al
 
+        ; Delay before the volume write so real hardware reliably processes
+        ; the DATA byte before the gate array accepts the next LATCH byte.
+        ; push/pop = 15+12 = 27 cycles @ 4.77 MHz ≈ 5.7 µs ≈ 20 chip clocks.
+        ; This is more compact than NOPs and provides greater timing margin.
+        push ax
+        pop  ax
+
         ; VOLUME byte: channel 0 attenuation = 0 (loudest): 1 00 1 0000 = 90h
-        ; Written after frequency so the correct pitch is loaded before unmuting.
+        ; Re-sent on every note so pressing SPACE then a note key works correctly.
         mov  al, 90h
         out  SND_PORT, al
 
