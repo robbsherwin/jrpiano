@@ -27,8 +27,8 @@
 ; (required on real PCjr hardware; DOSBox ignores this gating).
 ; do_play writes two frequency bytes plus a volume byte (attenuation=0)
 ; on every note.  Re-sending the volume byte restores sound after SPACE.
-; A push/pop delay before the volume byte guards against rapid consecutive
-; writes being dropped by the gate array on real hardware.
+; No software delay is required between SN76496 writes: the chip's READY
+; pin inserts ~42 wait states (~8.9 µs) per OUT on real PCjr hardware.
 ;
 ; Keyboard layout:
 ;   W E   T Y U       <- black keys  (C#  D#  F#  G#  A#)
@@ -98,36 +98,12 @@ start:
         ;   Noise channel attenuation:   1 11 1 1111 = 0FFh
         mov  al, 9Fh        ; ch0 silent
         out  SND_PORT, al
-        nop
-        nop
-        nop
-        nop
-        nop
-        nop
         mov  al, 0BFh       ; ch1 silent
         out  SND_PORT, al
-        nop
-        nop
-        nop
-        nop
-        nop
-        nop
         mov  al, 0DFh       ; ch2 silent
         out  SND_PORT, al
-        nop
-        nop
-        nop
-        nop
-        nop
-        nop
         mov  al, 0FFh       ; noise silent
         out  SND_PORT, al
-        nop
-        nop
-        nop
-        nop
-        nop
-        nop
 
         call show_octave    ; draw "+0" in the banner's Octave line
 
@@ -187,11 +163,8 @@ shift_up:
 ;    2. DATA   - loads high 6 bits of N
 ;    3. VOLUME - attenuation = 0 (full volume) -- restores after SPACE
 ;
-;  On real PCjr hardware the SN76496 is clocked at 3.58 MHz; consecutive
-;  OUT instructions that arrive too close together can be dropped by the
-;  gate array.  The extra NOPs between writes 2 and 3 ensure at least
-;  ~15 SN76496 clock periods of separation (~4.2 µs at 4.77 MHz 8088),
-;  which is well within the gate array's tolerance on real hardware.
+;  Back-to-back OUTs are safe on real hardware: SN76496 READY inserts
+;  ~42 wait states (~8.9 µs) per write, which is the chip's own load time.
 ; ============================================================
 do_play:
         ; LATCH byte: 1 00 0 D3D2D1D0  ->  80h OR (N AND 0Fh)
@@ -207,13 +180,6 @@ do_play:
         shr  ax, cl
         and  al, 3Fh
         out  SND_PORT, al
-
-        ; Delay before the volume write so real hardware reliably processes
-        ; the DATA byte before the gate array accepts the next LATCH byte.
-        ; push/pop = 15+12 = 27 cycles @ 4.77 MHz ≈ 5.7 µs ≈ 20 chip clocks.
-        ; This is more compact than NOPs and provides greater timing margin.
-        push ax
-        pop  ax
 
         ; VOLUME byte: channel 0 attenuation = 0 (loudest): 1 00 1 0000 = 90h
         ; Re-sent on every note so pressing SPACE then a note key works correctly.
