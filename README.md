@@ -52,8 +52,8 @@ PCjr-specific behavior:
 - The program initializes all tone/noise channels to silent. Channel 0
   stays muted until the first note; `do_play` unmutes it after writing
   the frequency.
-- A short delay before the volume write improves reliability on real PCjr
-  hardware for back-to-back chip writes.
+- Back-to-back SN76496 writes need no software delay: the chip's READY
+  pin inserts wait states on real PCjr hardware.
 
 Build and run (MASM/LINK):
 
