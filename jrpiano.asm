@@ -89,6 +89,8 @@ start:
 
         ; Initialise all four SN76496 channels to silent so we start from a
         ; known state regardless of what the BIOS left behind at power-on.
+        ; Leave them muted until the first note: unmuting here would play
+        ; whatever leftover frequency is still in the chip's period register.
         ; Attenuation 1111 = silent.
         ;   Channel 0 tone attenuation:  1 00 1 1111 = 9Fh
         ;   Channel 1 tone attenuation:  1 01 1 1111 = 0BFh
@@ -126,10 +128,6 @@ start:
         nop
         nop
         nop
-        ; Unmute channel 0 so it is ready to play on the first key press.
-        ; Attenuation 0000 = loudest:  1 00 1 0000 = 90h
-        mov  al, 90h
-        out  SND_PORT, al
 
         call show_octave    ; draw "+0" in the banner's Octave line
 
