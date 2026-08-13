@@ -49,8 +49,9 @@ PCjr-specific behavior:
 
 - On real hardware, audio from the SN76496 must be routed to the speaker by
   setting bits 5 and 6 of port `61h`.
-- The program initializes all tone/noise channels to silent, then unmutes
-  channel 0.
+- The program initializes all tone/noise channels to silent. Channel 0
+  stays muted until the first note; `do_play` unmutes it after writing
+  the frequency.
 - A short delay before the volume write improves reliability on real PCjr
   hardware for back-to-back chip writes.
 
