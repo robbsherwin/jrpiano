@@ -423,6 +423,9 @@ unhook_int9:
 ;  2. pushf + far CALL the original handler so the system's own
 ;     keyboard processing still runs (PCjr IR path, Tandy, clones).
 ;     That pair mimics INT; the old handler's IRET pops flags.
+;     AL must still hold the raw scan byte at this point: the PCjr
+;     BIOS INT 09h is entered from INT 48h with the scan code in AL
+;     and uses that register rather than re-reading port 60h.
 ;  3. Clear the BIOS keyboard buffer (0040:001A = 0040:001C) so
 ;     INT 16h / DOS do not also consume these keys.
 ;
@@ -436,20 +439,17 @@ new_int9:
         push cs
         pop  ds             ; DS = CODE (kbd[] and old_int9)
 
-        in   al, 60h        ; raw scan byte
-        mov  ah, al
-        and  al, 7Fh        ; AL = scan 0-127
-        xor  bh, bh
-        mov  bl, al         ; BX indexes kbd[]
-        xor  al, al         ; assume break -> 0
-        test ah, 80h
-        jnz  ni9_store
-        inc  al             ; make -> 1
-ni9_store:
-        mov  [kbd+bx], al
-
+        in   al, 60h        ; raw scan byte; keep AL intact for the chain
+        mov  bl, al
+        and  bl, 7Fh        ; BL = scan 0-127
+        xor  bh, bh         ; BX indexes kbd[]
+        mov  byte ptr [kbd+bx], 1   ; assume make -> 1
+        test al, 80h
+        jz   ni9_chain
+        mov  byte ptr [kbd+bx], 0   ; break -> 0
+ni9_chain:
         pushf
-        call dword ptr [old_int9]
+        call dword ptr [old_int9]   ; AL = raw scan byte, as the BIOS expects
 
         ; 0040:001A = buffer head, 0040:001C = buffer tail.  Equal = empty.
         cli

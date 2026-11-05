@@ -1,13 +1,53 @@
 PCjr Keyboard Piano
 
-This repo contains three versions of a keyboard piano for the IBM PCjr:
+A keyboard piano for the IBM PCjr that drives the SN76496 sound chip directly.
+The main program is `jrpiano3.asm`, which plays chords on all three tone
+voices. The earlier single-voice versions are kept in the repo for reference.
 
-- A BASIC program (`jrpiano.bas`) using Cassette/Disk BASIC
-- An 8086 assembly program (`jrpiano.asm`) for MS-DOS, built with MASM/LINK
-  into an `.EXE`
-- A NASM-syntax `.COM` variant (`piano2.asm`) of the same program
+- `jrpiano3.asm`: the chord version (main). 8088 assembly, MS-DOS `.EXE`,
+  built with MASM/LINK.
+- `jrpiano.asm`: the original single-voice `.EXE` version.
+- `piano2.asm`: a NASM-syntax `.COM` variant of the single-voice program.
+- `jrpiano.bas`: a Cassette/Disk BASIC version.
 
-## Basic
+## Chord version (`jrpiano3.asm`)
+
+Same key layout as the other versions, but up to three notes ring at once:
+
+```
+  W E   T Y U        <- sharps (black keys)
+ A S D F G H J K L   <- naturals (white keys)
+```
+
+- The first note key takes voice 0, the next two distinct keys take voices 1
+  and 2. A fourth new note steals voice 0, then 1, then 2 (round-robin).
+  Pressing a key already assigned to a voice retriggers that voice only.
+- `SPACE` silences all three voices and resets the allocator. While `SPACE`
+  is held no new notes start. `Z`/`X` shift the octave (`-3` to `+3`),
+  `ESC` quits.
+- Key release does not stop a note; notes ring until `SPACE` or until they
+  are stolen.
+
+How it reads the keyboard: BIOS `INT 16h` only delivers one character at a
+time and typematic repeats look like extra presses, so the program hooks
+`INT 09h`, records make/break for every scan code in a table, chains to the
+original BIOS handler (with the raw scan byte still in `AL`, which the PCjr
+BIOS expects), then empties the BIOS key buffer. The main loop polls that
+table for rising edges. `KEY_INT/` holds the Turbo Pascal keyboard unit and
+test program the same approach was taken from.
+
+Build and run (MASM/LINK):
+
+```bat
+MASM JRPIANO3.ASM;
+LINK JRPIANO3.OBJ;
+JRPIANO3
+```
+
+## Single-voice versions
+
+
+### Basic (`jrpiano.bas`)
 
 The PCjr's built-in Cassette/Disk BASIC makes this straightforward. The `SOUND`
 command drives the SN76496 chip directly, and `INKEY$` polls the keyboard
@@ -33,7 +73,7 @@ Notes:
 If you're typing it in manually, use `LIST` and `SAVE "PIANO"` to keep it, then
 run with `RUN`.
 
-## Assembly
+### Assembly (`jrpiano.asm` and `piano2.asm`)
 
 `jrpiano.asm` is an IBM PCjr 8088 MS-DOS `.EXE` version that talks to the
 SN76496 at I/O port `0C0h`.
