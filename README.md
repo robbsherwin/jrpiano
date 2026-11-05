@@ -1,16 +1,18 @@
 PCjr Keyboard Piano
 
 A keyboard piano for the IBM PCjr that drives the SN76496 sound chip directly.
-The main program is `jrpiano3.asm`, which plays chords on all three tone
-voices. The earlier single-voice versions are kept in the repo for reference.
+The main program is `jrpiano.asm`, which plays chords on all three tone
+voices. Two earlier single-voice versions are kept in the repo for reference.
 
-- `jrpiano3.asm`: the chord version (main). 8088 assembly, MS-DOS `.EXE`,
+- `jrpiano.asm`: the chord version (main). 8088 assembly, MS-DOS `.EXE`,
   built with MASM/LINK.
-- `jrpiano.asm`: the original single-voice `.EXE` version.
-- `piano2.asm`: a NASM-syntax `.COM` variant of the single-voice program.
+- `piano2.asm`: a NASM-syntax `.COM` variant of the original single-voice
+  program.
 - `jrpiano.bas`: a Cassette/Disk BASIC version.
+- `jrpiano.zip` holds the original single-voice `jrpiano.asm` and its
+  `JRPIANO.EXE`.
 
-## Chord version (`jrpiano3.asm`)
+## Chord version (`jrpiano.asm`)
 
 Same key layout as the other versions, but up to three notes ring at once:
 
@@ -39,9 +41,9 @@ test program the same approach was taken from.
 Build and run (MASM/LINK):
 
 ```bat
-MASM JRPIANO3.ASM;
-LINK JRPIANO3.OBJ;
-JRPIANO3
+MASM JRPIANO.ASM;
+LINK JRPIANO.OBJ;
+JRPIANO
 ```
 
 ## Single-voice versions
@@ -73,41 +75,20 @@ Notes:
 If you're typing it in manually, use `LIST` and `SAVE "PIANO"` to keep it, then
 run with `RUN`.
 
-### Assembly (`jrpiano.asm` and `piano2.asm`)
+### Assembly (`piano2.asm`)
 
-`jrpiano.asm` is an IBM PCjr 8088 MS-DOS `.EXE` version that talks to the
-SN76496 at I/O port `0C0h`.
+`piano2.asm` is the original single-voice program in NASM syntax, assembled on
+a modern machine as a flat `.COM` file. It talks to the SN76496 at I/O port
+`0C0h` on channel 0 only.
 
-What it does:
-
-- Uses BIOS keyboard input (`INT 16h`) for interactive play.
-- Maps the same key pattern as the BASIC version:
-  - `A S D F G H J K L` for white keys
-  - `W E T Y U` for black keys (`C# D# F# G# A#`)
-- `Z`/`X` shift octave down/up (range `-3` to `+3`), `SPACE` silences, `ESC`
-  exits.
-- Programs channel 0 by writing SN76496 latch/data bytes plus a volume byte.
-
-PCjr-specific behavior:
-
-- On real hardware, audio from the SN76496 must be routed to the speaker by
-  setting bits 5 and 6 of port `61h`.
-- The program initializes all tone/noise channels to silent. Channel 0
-  stays muted until the first note; `do_play` unmutes it after writing
-  the frequency.
+- Uses BIOS keyboard input (`INT 16h`), so one note at a time.
+- Same key layout as the chord version; `Z`/`X` shift octave (`-3` to `+3`),
+  `SPACE` silences, `ESC` exits.
+- Routes SN76496 audio to the speaker via port `61h` bits 5 and 6, mutes all
+  channels at startup, and re-sends the volume byte with every note so a note
+  after `SPACE` is audible.
 - Back-to-back SN76496 writes need no software delay: the chip's READY
   pin inserts wait states on real PCjr hardware.
-
-Build and run (MASM/LINK):
-
-```bat
-MASM JRPIANO.ASM;
-LINK JRPIANO.OBJ;
-JRPIANO
-```
-
-`piano2.asm` is the same program in NASM syntax, assembled on a modern machine
-as a flat `.COM` file:
 
 ```bash
 nasm -f bin -o PIANO2.COM piano2.asm
