@@ -42,7 +42,8 @@
 ; (Same approach as KEY_INT\KEYB_OBJ.PAS.)
 ;
 ; Startup sets port 61h bits 5:6 to route SN76496 audio to the speaker
-; (required on real PCjr hardware; DOSBox ignores this gating).
+; (required on real PCjr hardware; DOSBox ignores this gating).  The
+; original port 61h value is saved and restored on exit.
 ; play_voice writes two frequency bytes plus a volume byte (attenuation=0)
 ; on the chosen channel.  Re-sending the volume byte restores sound after
 ; SPACE.  No software delay is required between SN76496 writes: the chip's
@@ -107,6 +108,7 @@ start:
         ; DOSBox does not enforce this gating, which is why the program appeared
         ; to work in the emulator but produced complete silence on real hardware.
         in   al, 61h
+        mov  [old_61h], al  ; restored on exit so DOS/BIOS beeps work again
         or   al, 60h        ; bits 6 and 5 = 11: route SN76496 to speaker
         out  61h, al
 
@@ -332,6 +334,8 @@ ou_done:
 do_quit:
         call silence_all    ; don't leave a chord ringing in DOS
         call unhook_int9    ; restore BIOS INT 09h before we vanish
+        mov  al, [old_61h]  ; restore speaker audio source (8253 beeper)
+        out  61h, al
         mov  ax, 4C00h
         int  21h
 
@@ -523,6 +527,7 @@ octave      db  0           ; signed octave shift (OCT_MIN...OCT_MAX)
 voice_next  db  0           ; next SN76496 tone channel to steal (0,1,2)
 voice_sc    db  0, 0, 0     ; scan code occupying voices 0..2 (0 = free)
 old_int9    dd  0           ; original INT 09h far pointer (offset, segment)
+old_61h     db  0           ; port 61h value at startup (speaker source bits)
 
 ; kbd[] is written by new_int9: 1 = key down, 0 = up, index = scan & 7Fh.
 ; prev[] is the previous main-loop snapshot, used only for rising edges.
