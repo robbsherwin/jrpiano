@@ -1,5 +1,5 @@
 ; ============================================================================
-; JRPIANO.ASM  ·  PCjr Keyboard Piano
+; JRPIANO.ASM  ·  PCjr Keyboard Piano (chords)
 ; ============================================================================
 ; IBM PCjr  ·  Intel 8088  ·  MS-DOS .EXE file
 ;
@@ -17,24 +17,43 @@
 ;       D3..D0 = low 4 bits of 10-bit counter N
 ;
 ;   DATA byte   (bit 7 = 0):  0  0  D9 D8 D7 D6 D5 D4
-;       Upper 6 bits of the previously latched register's counter N
+;       Upper 6 bits of the previously latched register's counter N.
+;       The data byte has no channel field; it updates whichever register
+;       the previous LATCH selected.
 ;
 ;   Volume: attenuation 0000 = loudest, 1111 = silent
-;   Channel 0 full volume:  1 00 1 0000  =  90h
-;   Channel 0 silent:       1 00 1 1111  =  9Fh
+;   Channel 0 full volume / silent:  90h / 9Fh
+;   Channel 1 full volume / silent:  0B0h / 0BFh
+;   Channel 2 full volume / silent:  0D0h / 0DFh
+;
+; Version 3 plays chords by using all three tone generators.  The first
+; note key takes voice 0 and sustains (same feel as the original single-voice version).  A
+; second and third distinct note take voices 1 and 2.  A fourth new note
+; steals voice 0, then 1, then 2 (round-robin).  Pressing a key that is
+; already assigned to a voice retriggers that voice only.  SPACE silences
+; all three tone channels and resets the allocator.  Key release does not
+; stop a note; notes ring until SPACE or they are stolen.
+;
+; BIOS INT 16h only delivers one character at a time, and typematic
+; repeats would look like extra presses.  We therefore hook INT 09h
+; (IRQ1), record make/break in kbd[], chain to the original handler so
+; PCjr/Tandy/clone BIOS keyboard handling still runs, then empty the
+; BIOS key buffer.  The main loop polls kbd[] for rising edges.
+; (Same approach as KEY_INT\KEYB_OBJ.PAS.)
 ;
 ; Startup sets port 61h bits 5:6 to route SN76496 audio to the speaker
-; (required on real PCjr hardware; DOSBox ignores this gating).
-; do_play writes two frequency bytes plus a volume byte (attenuation=0)
-; on every note.  Re-sending the volume byte restores sound after SPACE.
-; No software delay is required between SN76496 writes: the chip's READY
-; pin inserts ~42 wait states (~8.9 µs) per OUT on real PCjr hardware.
+; (required on real PCjr hardware; DOSBox ignores this gating).  The
+; original port 61h value is saved and restored on exit.
+; play_voice writes two frequency bytes plus a volume byte (attenuation=0)
+; on the chosen channel.  Re-sending the volume byte restores sound after
+; SPACE.  No software delay is required between SN76496 writes: the chip's
+; READY pin inserts ~42 wait states (~8.9 µs) per OUT on real PCjr hardware.
 ;
-; Keyboard layout:
+; Keyboard layout (XT / PCjr 83-key scan codes in note_tab):
 ;   W E   T Y U       <- black keys  (C#  D#  F#  G#  A#)
 ;  A S D F G H J K L  <- white keys  (C   D   E   F   G   A   B   c   d)
 ;
-;   SPACE = silence   Z / X = octave down / up   ESC = quit
+;   SPACE = silence all voices   Z / X = octave down / up   ESC = quit
 ;
 ; -------------------------------------------------------------------------
 ; Assemble:  MASM JRPIANO.ASM;
@@ -50,15 +69,20 @@ N_MIN     EQU  14           ; Frequency ceiling ~7990 Hz  (prevents ultrasonic)
 N_MAX     EQU  1023         ; Frequency floor   ~109 Hz   (chip 10-bit max)
 OCT_MIN   EQU  -3           ; Lowest octave shift
 OCT_MAX   EQU  3            ; Highest octave shift
+SC_ESC    EQU  01h          ; XT/PCjr scan: Esc
+SC_SPACE  EQU  39h          ; XT/PCjr scan: Spacebar
+SC_Z      EQU  2Ch          ; XT/PCjr scan: Z  (octave down)
+SC_X      EQU  2Dh          ; XT/PCjr scan: X  (octave up)
 
 ; ---- Stack segment (required for EXE format; DOS sets up SS:SP from this) ---
 STCK    SEGMENT STACK 'STACK'
-        db  256 dup (?)     ; 256 bytes is generous for our shallow call depth
+        db  512 dup (?)     ; INT 09h + BIOS handler needs more than a leaf call
 STCK    ENDS
 
 ; ---- Code + data segment ----------------------------------------------------
 ; All data lives here alongside the code.  ASSUME DS:CODE is valid after we
-; point DS at CS in the start-up code below.
+; point DS at CS in the start-up code below.  The INT 09h ISR also forces
+; DS=CS because hardware interrupts do not arrive with our DS.
 CODE    SEGMENT 'CODE'
         ASSUME CS:CODE, DS:CODE, SS:STCK
 
@@ -84,6 +108,7 @@ start:
         ; DOSBox does not enforce this gating, which is why the program appeared
         ; to work in the emulator but produced complete silence on real hardware.
         in   al, 61h
+        mov  [old_61h], al  ; restored on exit so DOS/BIOS beeps work again
         or   al, 60h        ; bits 6 and 5 = 11: route SN76496 to speaker
         out  61h, al
 
@@ -106,126 +131,250 @@ start:
         out  SND_PORT, al
 
         call show_octave    ; draw "+0" in the banner's Octave line
+        call hook_int9      ; take over make/break; BIOS INT 16h is no longer used
 
 ; ============================================================
 ;  MAIN KEYBOARD LOOP
+;  Poll kbd[] (updated by INT 09h) for rising edges.  Level on ESC
+;  is enough to quit; SPACE silences on the make edge and, while held,
+;  blocks new notes so a chord cannot restart under the spacebar.
 ; ============================================================
 main_loop:
-        xor  ah, ah         ; AH=0 -> BIOS keyboard read (blocks until keypress)
-        int  16h            ; Returns: AL = ASCII char,  AH = scan code
+        ; 8088 conditional jumps are SHORT only (±127 bytes).  do_quit
+        ; lives well past that, so invert and use a near JMP.
+        cmp  byte ptr [kbd+SC_ESC], 0
+        je   ml_no_esc
+        jmp  do_quit
+ml_no_esc:
 
-        cmp  al, 1Bh        ; ESC?
-        je   do_quit
+        ; SPACE: rising edge -> silence all voices.  prev[] makes typematic
+        ; repeats (extra makes with no break) a no-op.
+        mov  bx, SC_SPACE
+        mov  al, [kbd+bx]
+        mov  ah, [prev+bx]
+        mov  [prev+bx], al
+        cmp  al, 1
+        jne  ml_not_space
+        cmp  ah, 0
+        jne  ml_not_space
+        call silence_all
+ml_not_space:
 
-        cmp  al, ' '        ; SPACE = silence current note
-        je   do_silence
+        ; Octave keys: rising edge only, so holding Z/X does not race.
+        mov  bx, SC_Z
+        mov  al, [kbd+bx]
+        mov  ah, [prev+bx]
+        mov  [prev+bx], al
+        cmp  al, 1
+        jne  ml_not_z
+        cmp  ah, 0
+        jne  ml_not_z
+        call oct_down
+ml_not_z:
+        mov  bx, SC_X
+        mov  al, [kbd+bx]
+        mov  ah, [prev+bx]
+        mov  [prev+bx], al
+        cmp  al, 1
+        jne  ml_not_x
+        cmp  ah, 0
+        jne  ml_not_x
+        call oct_up
+ml_not_x:
 
-        ; Fold to uppercase with a single AND (clears bit 5).
-        ; 'a'->'A', 'w'->'W', etc.  Safe: SPACE and ESC already handled above.
-        and  al, 0DFh
+        ; While SPACE is down, do not start notes.
+        cmp  byte ptr [kbd+SC_SPACE], 0
+        jne  main_loop
 
-        cmp  al, 'Z'
-        je   oct_down
-        cmp  al, 'X'
-        je   oct_up
+        ; Walk note_tab.  Each record is [db scan][dw N].  Sentinel scan=0.
+        mov  si, OFFSET note_tab
+ml_notes:
+        mov  bl, [si]
+        test bl, bl
+        jz   main_loop      ; end of table -> next poll pass
+        xor  bh, bh         ; BX = scan code 0-127
+        mov  al, [kbd+bx]
+        mov  ah, [prev+bx]
+        mov  [prev+bx], al
+        cmp  al, 1
+        jne  ml_note_next
+        cmp  ah, 0
+        jne  ml_note_next   ; not a rising edge (held, typematic, or release)
 
-        ; Note lookup: BX = SN76496 counter N, or 0 if key not mapped
-        call find_note
-        test bx, bx
-        jz   main_loop      ; unrecognised key - leave current note ringing
-
-        ; Apply octave shift using a CL-count shift (valid on 8088)
-        mov  cl, [octave]   ; signed byte, range OCT_MIN...OCT_MAX
-        cmp  cl, 0
-        je   do_play        ; octave == 0: play note as-is
-        jg   shift_up       ; positive -> higher pitch -> N decreases
-
-        ; Negative octave -> lower pitch -> N increases (left shift)
-        neg  cl             ; make count positive
-        shl  bx, cl         ; shift N left by |octave| positions
-        cmp  bx, N_MAX
-        jbe  do_play
-        mov  bx, N_MAX
-        jmp  do_play
-
-shift_up:
-        ; Positive octave -> higher pitch -> N decreases (right shift)
-        shr  bx, cl         ; shift N right by octave positions
-        cmp  bx, N_MIN
-        jae  do_play
-        mov  bx, N_MIN
-        ; fall through to do_play
+        ; New note press: AL is 1, BL is scan code, [si+1] is base N.
+        push si
+        mov  al, bl         ; find_note / alloc_play want scan in AL
+        call find_note      ; BX = N (always hits: we came from note_tab)
+        call apply_octave   ; BX adjusted; AL (scan) preserved
+        call alloc_play     ; AL = scan, BX = N
+        pop  si
+ml_note_next:
+        add  si, 3
+        jmp  ml_notes
 
 ; ============================================================
-;  PLAY NOTE
-;  Three bytes to the SN76496:
-;    1. LATCH  - selects channel 0 frequency, loads low 4 bits of N
-;    2. DATA   - loads high 6 bits of N
-;    3. VOLUME - attenuation = 0 (full volume) -- restores after SPACE
+;  PLAY NOTE ON ONE SN76496 VOICE
+;    In:  AL = voice 0..2,  BX = counter N (already octave-adjusted)
+;  Three bytes to the chip:
+;    1. LATCH  - selects that channel's frequency, loads low 4 bits of N
+;    2. DATA   - loads high 6 bits of N (no channel field)
+;    3. VOLUME - attenuation = 0 (full volume) for that channel
+;
+;  Channel bits live in latch bit 6:5 (RR).  voice<<5 yields:
+;    0 -> 00h,  1 -> 20h,  2 -> 40h
+;  OR those into 80h (freq latch) or 90h (volume latch).
 ;
 ;  Back-to-back OUTs are safe on real hardware: SN76496 READY inserts
 ;  ~42 wait states (~8.9 µs) per write, which is the chip's own load time.
+;  Destroys: AX, CX, DX
 ; ============================================================
-do_play:
-        ; LATCH byte: 1 00 0 D3D2D1D0  ->  80h OR (N AND 0Fh)
+play_voice:
+        mov  cl, 5
+        shl  al, cl         ; AL = RR << 5  (8088: shift count must be in CL)
+        mov  dh, al         ; DH = channel select bits for both latches
+
+        ; LATCH: 1 RR 0 D3D2D1D0  ->  80h OR (RR<<5) OR (N AND 0Fh)
         mov  al, bl
         and  al, 0Fh
         or   al, 80h
+        or   al, dh
         out  SND_PORT, al
 
-        ; DATA byte:  0 0 D9D8D7D6D5D4  ->  (N SHR 4) AND 3Fh
-        ; Shift count must be in CL on the 8088 (no immediate shift count > 1)
+        ; DATA:  0 0 D9D8D7D6D5D4  ->  (N SHR 4) AND 3Fh
         mov  ax, bx
         mov  cl, 4
         shr  ax, cl
         and  al, 3Fh
         out  SND_PORT, al
 
-        ; VOLUME byte: channel 0 attenuation = 0 (loudest): 1 00 1 0000 = 90h
-        ; Re-sent on every note so pressing SPACE then a note key works correctly.
+        ; VOLUME: 1 RR 1 0000  ->  90h OR (RR<<5)
+        ; Re-sent every time so SPACE then a note key works correctly.
         mov  al, 90h
+        or   al, dh
         out  SND_PORT, al
+        ret
 
-        jmp  main_loop      ; note sustains; loop back for next keypress
+; ============================================================
+;  ALLOCATE A VOICE AND PLAY
+;    In:  AL = keyboard scan code,  BX = N
+;  If this scan code already owns a voice, retrigger that voice.
+;  Otherwise take voice_next (0,1,2,0,...) and steal if occupied.
+;  Destroys: AX, CX, DX, SI
+; ============================================================
+alloc_play:
+        mov  dh, al         ; DH = scan code (play_voice will trash AL)
+        mov  si, OFFSET voice_sc
+        xor  cx, cx         ; CL = candidate voice 0..2
+ap_find:
+        cmp  cl, 3
+        jae  ap_new         ; not already assigned -> steal/allocate next
+        cmp  dh, [si]
+        je   ap_use         ; same key still owns voice CL
+        inc  si
+        inc  cl
+        jmp  ap_find
+
+ap_new:
+        mov  cl, [voice_next]
+        mov  si, OFFSET voice_sc
+        xor  ch, ch
+        add  si, cx         ; SI -> voice_sc[voice_next]
+        mov  [si], dh       ; this scan code now owns that voice
+        mov  al, cl
+        inc  al
+        cmp  al, 3
+        jb   ap_wrap
+        xor  al, al         ; 2+1 -> 0
+ap_wrap:
+        mov  [voice_next], al
+        ; fall through with CL = allocated voice
+
+ap_use:
+        mov  al, cl         ; AL = voice 0..2, BX still = N
+        jmp  play_voice     ; tail call (ret from play_voice)
 
 ; ============================================================
 ;  HANDLERS
 ; ============================================================
-do_silence:
-        ; Channel 0 attenuation = 15 (silent): 1 00 1 1111 = 9Fh
+silence_all:
+        ; Mute all three tone generators.  Noise stays silent from startup.
         mov  al, 9Fh
         out  SND_PORT, al
-        jmp  main_loop
+        mov  al, 0BFh
+        out  SND_PORT, al
+        mov  al, 0DFh
+        out  SND_PORT, al
+        xor  al, al
+        mov  [voice_next], al
+        mov  [voice_sc], al
+        mov  [voice_sc+1], al
+        mov  [voice_sc+2], al
+        ret
 
 oct_down:
         mov  al, [octave]
         cmp  al, OCT_MIN
-        je   main_loop
+        je   od_done
         dec  al
         mov  [octave], al
         call show_octave
-        jmp  main_loop
+od_done:
+        ret
 
 oct_up:
         mov  al, [octave]
         cmp  al, OCT_MAX
-        je   main_loop
+        je   ou_done
         inc  al
         mov  [octave], al
         call show_octave
-        jmp  main_loop
+ou_done:
+        ret
 
 do_quit:
-        mov  al, 9Fh        ; silence channel 0 before returning to DOS
-        out  SND_PORT, al
+        call silence_all    ; don't leave a chord ringing in DOS
+        call unhook_int9    ; restore BIOS INT 09h before we vanish
+        mov  al, [old_61h]  ; restore speaker audio source (8253 beeper)
+        out  61h, al
         mov  ax, 4C00h
         int  21h
 
 ; ============================================================
+;  SUBROUTINE: apply_octave
+;    In/Out: BX = SN76496 counter N
+;    Preserves: AL (callers keep the scan code there)
+;    Destroys: CX
+;  Positive octave -> higher pitch -> smaller N (right shift).
+;  Negative octave -> lower pitch -> larger N (left shift).
+;  Shift count must be in CL on the 8088.
+; ============================================================
+apply_octave:
+        push ax
+        mov  cl, [octave]
+        cmp  cl, 0
+        je   ao_done
+        jg   ao_up
+        neg  cl
+        shl  bx, cl
+        cmp  bx, N_MAX
+        jbe  ao_done
+        mov  bx, N_MAX
+        jmp  ao_done
+ao_up:
+        shr  bx, cl
+        cmp  bx, N_MIN
+        jae  ao_done
+        mov  bx, N_MIN
+ao_done:
+        pop  ax
+        ret
+
+; ============================================================
 ;  SUBROUTINE: find_note
-;    In:  AL = uppercase key character (AND 0DFh applied by caller)
+;    In:  AL = XT/PCjr scan code
 ;    Out: BX = SN76496 counter N (1-1023), or 0 if not in table
 ;    Destroys: SI, BX
+;    Preserves: AL
 ; ============================================================
 find_note:
         push si
@@ -236,7 +385,7 @@ fn_scan:
         jz   fn_miss
         cmp  bl, al
         je   fn_hit
-        add  si, 3          ; advance: 1-byte key + 2-byte N word
+        add  si, 3          ; advance: 1-byte scan + 2-byte N word
         jmp  fn_scan
 fn_hit:
         mov  bx, [si+1]     ; load 16-bit N value (little-endian)
@@ -246,6 +395,78 @@ fn_miss:
         xor  bx, bx         ; return 0 = not found
         pop  si
         ret
+
+; ============================================================
+;  SUBROUTINE: hook_int9 / unhook_int9
+;  DOS INT 21h AH=35h gets the current vector (ES:BX);
+;  AH=25h installs DS:DX.  Our DS is already CS.
+; ============================================================
+hook_int9:
+        mov  ax, 3509h      ; AH=35h get vector, AL=09h
+        int  21h
+        mov  word ptr [old_int9], bx
+        mov  word ptr [old_int9+2], es
+        mov  dx, OFFSET new_int9
+        mov  ax, 2509h      ; AH=25h set vector, AL=09h
+        int  21h
+        ret
+
+unhook_int9:
+        push ds
+        lds  dx, [old_int9] ; DS:DX = original INT 09h
+        mov  ax, 2509h
+        int  21h
+        pop  ds
+        ret
+
+; ============================================================
+;  HARDWARE INTERRUPT: new_int9  (replaces INT 09h / IRQ1)
+;
+;  1. Read port 60h.  Bit 7 clear = make (key down), set = break (up).
+;     Bits 6:0 are the scan code.  Store 1 or 0 in kbd[scan].
+;  2. pushf + far CALL the original handler so the system's own
+;     keyboard processing still runs (PCjr IR path, Tandy, clones).
+;     That pair mimics INT; the old handler's IRET pops flags.
+;     AL must still hold the raw scan byte at this point: the PCjr
+;     BIOS INT 09h is entered from INT 48h with the scan code in AL
+;     and uses that register rather than re-reading port 60h.
+;  3. Clear the BIOS keyboard buffer (0040:001A = 0040:001C) so
+;     INT 16h / DOS do not also consume these keys.
+;
+;  DS is unknown on entry: every data reference uses DS=CS.
+;  Do not touch the SN76496 here; the main loop owns audio.
+; ============================================================
+new_int9:
+        push ax
+        push bx
+        push ds
+        push cs
+        pop  ds             ; DS = CODE (kbd[] and old_int9)
+
+        in   al, 60h        ; raw scan byte; keep AL intact for the chain
+        mov  bl, al
+        and  bl, 7Fh        ; BL = scan 0-127
+        xor  bh, bh         ; BX indexes kbd[]
+        mov  byte ptr [kbd+bx], 1   ; assume make -> 1
+        test al, 80h
+        jz   ni9_chain
+        mov  byte ptr [kbd+bx], 0   ; break -> 0
+ni9_chain:
+        pushf
+        call dword ptr [old_int9]   ; AL = raw scan byte, as the BIOS expects
+
+        ; 0040:001A = buffer head, 0040:001C = buffer tail.  Equal = empty.
+        cli
+        mov  ax, 40h
+        mov  ds, ax
+        mov  ax, ds:[1Ch]
+        mov  ds:[1Ah], ax
+        sti
+
+        pop  ds
+        pop  bx
+        pop  ax
+        iret
 
 ; ============================================================
 ;  SUBROUTINE: show_octave
@@ -302,48 +523,58 @@ tty:
 ; ============================================================
 ;  DATA
 ; ============================================================
-octave  db  0               ; signed octave shift (OCT_MIN...OCT_MAX)
+octave      db  0           ; signed octave shift (OCT_MIN...OCT_MAX)
+voice_next  db  0           ; next SN76496 tone channel to steal (0,1,2)
+voice_sc    db  0, 0, 0     ; scan code occupying voices 0..2 (0 = free)
+old_int9    dd  0           ; original INT 09h far pointer (offset, segment)
+old_61h     db  0           ; port 61h value at startup (speaker source bits)
 
-; note_tab: packed 3-byte records  [db uppercase_key]  [dw N_counter]
-; Terminated by a 00h sentinel byte.
+; kbd[] is written by new_int9: 1 = key down, 0 = up, index = scan & 7Fh.
+; prev[] is the previous main-loop snapshot, used only for rising edges.
+kbd         db  128 dup (0)
+prev        db  128 dup (0)
+
+; note_tab: packed 3-byte records  [db XT_scan_code]  [dw N_counter]
+; Terminated by a 00h sentinel byte (scan code 0 is not a real make).
 ;
 ; N = round( 3,579,545 / (32 x f_Hz) )  =  round( 111,860.78 / f_Hz )
 ;
-; All keys are uppercase because main_loop applies AND AL, 0DFh before
-; calling find_note.  Natural keys (ASDFGHJKL) and sharp keys (WETYU)
-; are distinct uppercase letters with no overlap.
+; Indexed by hardware scan code, not ASCII, because INT 09h never gives
+; us characters.  XT/PCjr 83-key codes (KEY_INT targets the same set):
+;   A=1Eh S=1Fh D=20h F=21h G=22h H=23h J=24h K=25h L=26h
+;   W=11h E=12h T=14h Y=15h U=16h
 ;
 ; N values match piano2.asm (slightly more accurate than jrpiano.bas).
 note_tab:
         ; White keys (C major scale)
-        db  'A'
+        db  1Eh             ; A
         dw  428             ; C4   261.4 Hz  (std 261.63)
-        db  'S'
+        db  1Fh             ; S
         dw  381             ; D4   293.6 Hz  (std 293.66)
-        db  'D'
+        db  20h             ; D
         dw  339             ; E4   330.0 Hz  (std 329.63)
-        db  'F'
+        db  21h             ; F
         dw  320             ; F4   349.6 Hz  (std 349.23)
-        db  'G'
+        db  22h             ; G
         dw  285             ; G4   392.5 Hz  (std 392.00)
-        db  'H'
+        db  23h             ; H
         dw  254             ; A4   440.5 Hz  (std 440.00)
-        db  'J'
+        db  24h             ; J
         dw  227             ; B4   492.9 Hz  (std 493.88)
-        db  'K'
+        db  25h             ; K
         dw  214             ; C5   522.7 Hz  (std 523.25)
-        db  'L'
+        db  26h             ; L
         dw  190             ; D5   588.7 Hz  (std 587.33)
         ; Black keys (sharps)
-        db  'W'
+        db  11h             ; W
         dw  404             ; C#4  276.9 Hz  (std 277.18)
-        db  'E'
+        db  12h             ; E
         dw  360             ; D#4  310.7 Hz  (std 311.13)
-        db  'T'
+        db  14h             ; T
         dw  302             ; F#4  370.5 Hz  (std 369.99)
-        db  'Y'
+        db  15h             ; Y
         dw  269             ; G#4  415.8 Hz  (std 415.30)
-        db  'U'
+        db  16h             ; U
         dw  240             ; A#4  466.1 Hz  (std 466.16)
         db  0               ; end-of-table sentinel
 
@@ -361,7 +592,8 @@ msg_banner:
         db  '   C  D  E  F  G  A  B  c  d', 0Dh, 0Ah
         db  0Dh, 0Ah
         db  '  Octave: +0   (Z/X to shift)', 0Dh, 0Ah
-        db  '  SPACE = silence     ESC = quit', 0Dh, 0Ah
+        db  '  SPACE = silence all     ESC = quit', 0Dh, 0Ah
+        db  '  Hold up to 3 keys for chords', 0Dh, 0Ah
         db  '$'
 
 CODE    ENDS
