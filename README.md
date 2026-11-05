@@ -1,9 +1,11 @@
 PCjr Keyboard Piano
 
-This repo contains two versions of a keyboard piano for the IBM PCjr:
+This repo contains three versions of a keyboard piano for the IBM PCjr:
 
-- A BASIC program using Cassette/Disk BASIC
-- An 8086 assembly program (`jrpiano.asm`) for MS-DOS
+- A BASIC program (`jrpiano.bas`) using Cassette/Disk BASIC
+- An 8086 assembly program (`jrpiano.asm`) for MS-DOS, built with MASM/LINK
+  into an `.EXE`
+- A NASM-syntax `.COM` variant (`piano2.asm`) of the same program
 
 ## Basic
 
@@ -22,10 +24,11 @@ Notes:
 
 - Duration: `SOUND F, 4` plays for about 0.22 seconds (4 of 18.2 ticks/sec).
   Increase to 9 or 18 for more sustain, or decrease to 2 for staccato.
-- Octave shift: `Z` and `X` halve/double all frequencies. Clamps in the BASIC
-  code keep values within the chip's valid range (37-32767 Hz).
-- Sharps: these check the original lowercase `K$` before uppercase conversion,
-  since `W/E/T/Y/U` are also valid natural-key inputs after folding.
+- Octave shift: `Z` and `X` halve/double all frequencies, within a shift range
+  of `-3` to `+3`. Clamps in the BASIC code keep values within the `SOUND`
+  statement's valid range (37-32767 Hz).
+- Sharps: `W/E/T/Y/U` and the natural keys are distinct letters, so both
+  versions fold input to uppercase and accept either case for every key.
 
 If you're typing it in manually, use `LIST` and `SAVE "PIANO"` to keep it, then
 run with `RUN`.
@@ -61,6 +64,13 @@ Build and run (MASM/LINK):
 MASM JRPIANO.ASM;
 LINK JRPIANO.OBJ;
 JRPIANO
+```
+
+`piano2.asm` is the same program in NASM syntax, assembled on a modern machine
+as a flat `.COM` file:
+
+```bash
+nasm -f bin -o PIANO2.COM piano2.asm
 ```
 
 

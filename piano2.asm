@@ -1,10 +1,11 @@
 ; ============================================================
 ;  piano2.ASM  --  PCjr Keyboard Piano
 ; ============================================================
-;  Assemble on a modern machine, then transfer the .COM file:
-;    nasm -f bin -o PIANO.COM PIANO.ASM
+;  NASM syntax.  Assemble on a modern machine, then transfer the
+;  .COM file to the PCjr:
+;    nasm -f bin -o PIANO2.COM piano2.asm
 ;
-;  Or use MASM 2.0+ directly on the PCjr (see notes below)
+;  (For a MASM-buildable .EXE version see jrpiano.asm.)
 ;
 ;  Key layout:
 ;    [ W ][ E ]         [ T ][ Y ][ U ]    <- sharps
@@ -35,14 +36,29 @@ start:
         mov     dx, msg_banner
         int     21h
 
-        ; Set channel 0 to maximum volume.
+        ; On the PCjr, port 61h bits 6:5 select the speaker audio source.
+        ; They reset to 00 (8253 timer); 11 routes the SN76496 to the
+        ; speaker.  Without this the chip is never heard on real hardware.
+        in      al, 61h
+        or      al, 60h
+        out     61h, al
+
+        ; Silence all four SN76496 channels so we start from a known state.
         ; SN76496 latch byte:  1 RR T AAAA
         ;   1    = this is a latch/command byte
-        ;   RR   = 00  (channel 0)
+        ;   RR   = channel (00/01/10 tone, 11 noise)
         ;   T    = 1   (attenuation register)
-        ;   AAAA = 0000 (attenuation 0 = loudest)
-        ;   => 0x90
-        mov     al, 090h
+        ;   AAAA = 1111 (attenuation 15 = silent)
+        ; Channel 0 stays muted until the first note; do_play unmutes it
+        ; after loading the frequency, so no leftover period register is
+        ; heard at startup.
+        mov     al, 09Fh        ; ch0 silent
+        out     SPORT, al
+        mov     al, 0BFh        ; ch1 silent
+        out     SPORT, al
+        mov     al, 0DFh        ; ch2 silent
+        out     SPORT, al
+        mov     al, 0FFh        ; noise silent
         out     SPORT, al
 
         mov     byte [oct], 0
@@ -98,9 +114,12 @@ oct_higher:
 ; ============================================================
 ;  PLAY NOTE: write divisor in BX to SN76496 channel 0
 ;
-;  The chip takes two bytes:
-;    Latch: 1_00_0_LLLL  (ch 0, frequency, divisor bits 3:0)
-;    Data:  0_0_HHHHHH   (divisor bits 9:4)
+;  The chip takes two bytes for the frequency, then a volume byte:
+;    Latch:  1_00_0_LLLL  (ch 0, frequency, divisor bits 3:0)
+;    Data:   0_0_HHHHHH   (divisor bits 9:4)
+;    Volume: 1_00_1_0000  (ch 0, attenuation 0 = loudest) = 0x90
+;  The volume byte is re-sent on every note so that a note pressed
+;  after SPACE (which mutes channel 0) is audible again.
 ; ============================================================
 do_play:
         mov     al, bl
@@ -112,6 +131,9 @@ do_play:
         mov     cl, 4
         shr     ax, cl          ; shift divisor right 4 -> upper bits in AL
         and     al, 03Fh        ; keep 6 bits for data byte
+        out     SPORT, al
+
+        mov     al, 090h        ; ch 0 attenuation 0: unmute / restore volume
         out     SPORT, al
 
         jmp     key_loop        ; note sustains; loop for next keypress
@@ -233,7 +255,7 @@ note_tab:
         db  'G',  29, 1     ;  285  -> G4   392.5 Hz
         db  'Y',  13, 1     ;  269  -> G#4  415.8 Hz
         db  'H', 254,  0    ;  254  -> A4   440.5 Hz
-        db  'U', 240,  0    ;  240  -> A#4  466.4 Hz
+        db  'U', 240,  0    ;  240  -> A#4  466.1 Hz
         db  'J', 227,  0    ;  227  -> B4   492.9 Hz
         db  'K', 214,  0    ;  214  -> C5   522.7 Hz
         db  'L', 190,  0    ;  190  -> D5   588.7 Hz

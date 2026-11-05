@@ -12,7 +12,7 @@
 120 PRINT " ESC = quit"
 130 PRINT ""
 140 OC = 0
-150 PRINT "Octave shift: 0"
+150 GOSUB 500
 160 '
 170 ' ---- MAIN LOOP ----
 180 K$ = INKEY$
@@ -38,12 +38,12 @@
 380 IF KC = ASC("K") THEN F = 523  ' C5
 390 IF KC = ASC("L") THEN F = 587  ' D5
 400 '
-410 ' Sharp keys (black keys) - use lowercase to distinguish
-420 IF K$ = "w" THEN F = 277  ' C#4
-430 IF K$ = "e" THEN F = 311  ' D#4
-440 IF K$ = "t" THEN F = 370  ' F#4
-450 IF K$ = "y" THEN F = 415  ' G#4
-460 IF K$ = "u" THEN F = 466  ' A#4
+410 ' Sharp keys (black keys) - distinct letters, so KC is safe here too
+420 IF KC = ASC("W") THEN F = 277  ' C#4
+430 IF KC = ASC("E") THEN F = 311  ' D#4
+440 IF KC = ASC("T") THEN F = 370  ' F#4
+450 IF KC = ASC("Y") THEN F = 415  ' G#4
+460 IF KC = ASC("U") THEN F = 466  ' A#4
 470 '
 480 ' Apply octave shift and play
 490 IF F = 0 THEN 180
@@ -53,7 +53,9 @@
 498 SOUND F, 4
 499 GOTO 180
 500 '
-510 ' Subroutine: display octave
-520 LOCATE 15, 1
+510 ' Subroutine: clamp octave to -3..+3 and display it (row 12)
+512 IF OC < -3 THEN OC = -3
+514 IF OC > 3 THEN OC = 3
+520 LOCATE 12, 1
 530 PRINT "Octave shift: "; OC; "  "
 540 RETURN
